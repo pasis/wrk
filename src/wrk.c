@@ -158,6 +158,8 @@ int main(int argc, char **argv) {
         errors.write   += t->errors.write;
         errors.timeout += t->errors.timeout;
         errors.status  += t->errors.status;
+        errors.established += t->errors.established;
+        errors.reconnect += t->errors.reconnect;
     }
 
     uint64_t runtime_us = time_us() - start;
@@ -178,15 +180,16 @@ int main(int argc, char **argv) {
     char *runtime_msg = format_time_us(runtime_us);
 
     printf("  %"PRIu64" requests in %s, %sB read\n", complete, runtime_msg, format_binary(bytes));
-    if (errors.connect || errors.read || errors.write || errors.timeout) {
-        printf("  Socket errors: connect %d, read %d, write %d, timeout %d\n",
-               errors.connect, errors.read, errors.write, errors.timeout);
+    if (errors.connect || errors.read || errors.write || errors.timeout || errors.reconnect) {
+        printf("  Socket errors: connect %d, read %d, write %d, timeout %d, reconnect %d\n",
+               errors.connect, errors.read, errors.write, errors.timeout, errors.reconnect);
     }
 
     if (errors.status) {
         printf("  Non-2xx or 3xx responses: %d\n", errors.status);
     }
 
+    printf("Established connections: %u\n", errors.established);
     printf("Requests/sec: %9.2Lf\n", req_per_s);
     printf("Transfer/sec: %10sB\n", format_binary(bytes_per_s));
 
@@ -267,6 +270,7 @@ static int reconnect_socket(thread *thread, connection *c) {
     aeDeleteFileEvent(thread->loop, c->fd, AE_WRITABLE | AE_READABLE);
     sock.close(c);
     close(c->fd);
+    thread->errors.reconnect++;
     return connect_socket(thread, c);
 }
 
@@ -370,6 +374,7 @@ static void socket_connected(aeEventLoop *loop, int fd, void *data, int mask) {
 
     http_parser_init(&c->parser, HTTP_RESPONSE);
     c->written = 0;
+    c->thread->errors.established++;
 
     aeCreateFileEvent(c->thread->loop, fd, AE_READABLE, socket_readable, c);
     aeCreateFileEvent(c->thread->loop, fd, AE_WRITABLE, socket_writeable, c);
