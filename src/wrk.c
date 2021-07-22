@@ -12,12 +12,20 @@
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 #endif
 
+enum {
+    PHASE_INIT = 0,
+    PHASE_WARMUP,
+    PHASE_NORMAL,
+};
+
 static struct config {
     uint64_t connections;
     uint64_t duration;
     uint64_t threads;
     uint64_t timeout;
     uint64_t pipeline;
+    uint64_t warmup_timeout;
+    bool     warmup;
     bool     delay;
     bool     dynamic;
     bool     latency;
@@ -67,6 +75,9 @@ static void usage() {
            "        --latency          Print latency statistics   \n"
            "        --timeout     <T>  Socket/request timeout     \n"
            "    -v, --version          Print version details      \n"
+           "    -W  --warmup           Enable warmup phase        \n"
+           "                           In warmup phase connections are establised,\n"
+           "                           but no requests are sent   \n"
            "                                                      \n"
            "  Numeric arguments may include a SI unit (1k, 1M, 1G)\n"
            "  Time arguments may include a time unit (2s, 2m, 2h)\n");
@@ -187,9 +198,17 @@ int main(int argc, char **argv) {
     sleep(cfg.duration);
     stop = 1;
 
+    uint64_t phase_normal_start_min = 0;
+
     for (uint64_t i = 0; i < cfg.threads; i++) {
         thread *t = &threads[i];
         pthread_join(t->thread, NULL);
+
+        // Find timestamp of the first transition to the NORMAL phase.
+        // With WARMUP period enabled we use it to measure real benchmarking runtime.
+        if (!phase_normal_start_min || (t->phase_normal_start && t->phase_normal_start < phase_normal_start_min)) {
+            phase_normal_start_min = t->phase_normal_start;
+        }
 
         complete += t->complete;
         bytes    += t->bytes;
@@ -203,6 +222,10 @@ int main(int argc, char **argv) {
         errors.reconnect += t->errors.reconnect;
     }
 
+    if (phase_normal_start_min != 0) {
+        // Measure runtime starting from the first transition to NORMAL phase.
+        start = phase_normal_start_min;
+    }
     uint64_t runtime_us = time_us() - start;
     long double runtime_s   = runtime_us / 1000000.0;
     long double req_per_s   = complete   / runtime_s;
@@ -245,6 +268,35 @@ int main(int argc, char **argv) {
     return 0;
 }
 
+static void phase_move(thread *thread, int phase) {
+    if (thread->phase == PHASE_WARMUP && phase == PHASE_NORMAL) {
+        connection *c  = thread->cs;
+
+        printf("Warmup phase is ended (thread=%p, duration=%"PRIu64"sec).\n",
+               thread, (time_us() - thread->start) / 1000000UL);
+
+        for (uint64_t i = 0; i < thread->connections; i++, c++) {
+            if (c->is_connected) {
+                aeCreateFileEvent(thread->loop, c->fd, AE_READABLE, socket_readable, c);
+                aeCreateFileEvent(thread->loop, c->fd, AE_WRITABLE, socket_writeable, c);
+            }
+        }
+        thread->start = time_us();
+        thread->phase_normal_start = thread->start;
+    }
+
+    thread->phase = phase;
+}
+
+static int warmup_timed_out(aeEventLoop *loop, long long id, void *data) {
+    thread *thread = data;
+
+    // It is safe to transit to NORMAL if we're already in NORMAL phase
+    phase_move(thread, PHASE_NORMAL);
+
+    return AE_NOMORE;
+}
+
 void *thread_main(void *arg) {
     thread *thread = arg;
 
@@ -270,7 +322,21 @@ void *thread_main(void *arg) {
     aeEventLoop *loop = thread->loop;
     aeCreateTimeEvent(loop, RECORD_INTERVAL_MS, record_rate, thread, NULL);
 
+    if (cfg.warmup) {
+        uint64_t warmup_timeout = cfg.warmup_timeout;
+        if (!warmup_timeout) {
+            // Default timeout is 600sec for 350K connections
+            warmup_timeout = cfg.connections * 600000UL / 350000UL;
+            if (warmup_timeout < 1000) {
+                // Don't make too short timeout, not to be affected by timer resolution
+                warmup_timeout = 1000;
+            }
+        }
+        aeCreateTimeEvent(loop, warmup_timeout, warmup_timed_out, thread, NULL);
+    }
+
     thread->start = time_us();
+    thread->phase = cfg.warmup ? PHASE_WARMUP : PHASE_NORMAL;
     aeMain(loop);
 
     aeDeleteEventLoop(loop);
@@ -299,6 +365,8 @@ static int connect_socket(thread *thread, connection *c) {
     struct addrinfo *addr = thread->addr;
     struct aeEventLoop *loop = thread->loop;
     int fd, flags;
+
+    c->is_connected = false;
 
     fd = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
     if (fd < 0) {
@@ -468,9 +536,19 @@ static void socket_connected(aeEventLoop *loop, int fd, void *data, int mask) {
     http_parser_init(&c->parser, HTTP_RESPONSE);
     c->written = 0;
     c->thread->errors.established++;
+    c->is_connected = true;
 
-    aeCreateFileEvent(c->thread->loop, fd, AE_READABLE, socket_readable, c);
-    aeCreateFileEvent(c->thread->loop, fd, AE_WRITABLE, socket_writeable, c);
+    // Create file events only in NORMAL phase. We create the events for connected
+    // sockets when move from WARMUP to NORMAL phase.
+    if (c->thread->phase == PHASE_NORMAL) {
+        aeCreateFileEvent(c->thread->loop, fd, AE_READABLE, socket_readable, c);
+        aeCreateFileEvent(c->thread->loop, fd, AE_WRITABLE, socket_writeable, c);
+    }
+
+    // TODO Improve how we decide when to move to NORMAL phase
+    if (c->thread->errors.established == c->thread->connections) {
+        phase_move(c->thread, PHASE_NORMAL);
+    }
 
     return;
 
@@ -575,6 +653,7 @@ static struct option longopts[] = {
     { "timeout",     required_argument, NULL, 'T' },
     { "help",        no_argument,       NULL, 'h' },
     { "version",     no_argument,       NULL, 'v' },
+    { "warmup",      no_argument,       NULL, 'W' },
     { NULL,          0,                 NULL,  0  }
 };
 
@@ -588,7 +667,7 @@ static int parse_args(struct config *cfg, char **url, struct http_parser_url *pa
     cfg->duration    = 10;
     cfg->timeout     = SOCKET_TIMEOUT_MS;
 
-    while ((c = getopt_long(argc, argv, "t:c:i:d:s:H:T:Lrv?", longopts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "t:c:i:d:s:H:T:LrWv?", longopts, NULL)) != -1) {
         switch (c) {
             case 't':
                 if (scan_metric(optarg, &cfg->threads)) return -1;
@@ -618,6 +697,9 @@ static int parse_args(struct config *cfg, char **url, struct http_parser_url *pa
             case 'v':
                 printf("wrk %s [%s] ", VERSION, aeGetApiName());
                 printf("Copyright (C) 2012 Will Glozer\n");
+                break;
+            case 'W':
+                cfg->warmup = true;
                 break;
             case 'h':
             case '?':
