@@ -36,6 +36,7 @@ typedef struct {
     lua_State *L;
     errors errors;
     struct connection *cs;
+    char *local_ip;
 } thread;
 
 typedef struct {
@@ -62,5 +63,9 @@ typedef struct connection {
     buffer body;
     char buf[RECVBUF];
 } connection;
+
+extern char *g_local_ip;
+
+void bind_socket(int fd, char *addr);
 
 #endif /* WRK_H */
