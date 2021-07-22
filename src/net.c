@@ -6,7 +6,7 @@
 
 #include "net.h"
 
-status sock_connect(connection *c, char *host) {
+status sock_connect(connection *c, char *host, int *retry_flags) {
     return OK;
 }
 

@@ -321,6 +321,7 @@ static int connect_socket(thread *thread, connection *c) {
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flags, sizeof(flags));
 
     flags = AE_READABLE | AE_WRITABLE;
+    c->connect_mask = flags;
     if (aeCreateFileEvent(loop, fd, flags, socket_connected, c) == AE_OK) {
         c->parser.data = c;
         c->fd = fd;
@@ -432,11 +433,36 @@ static int response_complete(http_parser *parser) {
 
 static void socket_connected(aeEventLoop *loop, int fd, void *data, int mask) {
     connection *c = data;
+    int retry_flags = 0;
+    int add_flags = 0;
+    int del_flags = 0;
+    int rc;
 
-    switch (sock.connect(c, cfg.host)) {
+    switch (sock.connect(c, cfg.host, &retry_flags)) {
         case OK:    break;
         case ERROR: goto error;
-        case RETRY: return;
+        case RETRY:
+            // Remove non-reqeusted events not to consume 100% of CPU because of
+            // polling TLS socket during TLS handshake phase.
+            if ((retry_flags & E_WANT_READ) && !(c->connect_mask & AE_READABLE))
+                add_flags |= AE_READABLE;
+            if (!(retry_flags & E_WANT_READ) && (c->connect_mask & AE_READABLE))
+                del_flags |= AE_READABLE;
+            if ((retry_flags & E_WANT_WRITE) && !(c->connect_mask & AE_WRITABLE))
+                add_flags |= AE_WRITABLE;
+            if (!(retry_flags & E_WANT_WRITE) && (c->connect_mask & AE_WRITABLE))
+                del_flags |= AE_WRITABLE;
+            assert((add_flags & del_flags) == 0);
+            if (del_flags != 0) {
+                aeDeleteFileEvent(loop, c->fd, del_flags);
+                c->connect_mask &= ~del_flags;
+            }
+            if (add_flags != 0) {
+                rc = aeCreateFileEvent(loop, c->fd, add_flags, socket_connected, c);
+                assert(rc == AE_OK);
+                c->connect_mask |= add_flags;
+            }
+            return;
     }
 
     http_parser_init(&c->parser, HTTP_RESPONSE);

@@ -52,6 +52,7 @@ typedef struct connection {
         FIELD, VALUE
     } state;
     int fd;
+    int connect_mask;
     SSL *ssl;
     bool delayed;
     uint64_t start;
