@@ -1,5 +1,9 @@
 // Copyright (C) 2012 - Will Glozer.  All rights reserved.
 
+#include <assert.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+
 #include "wrk.h"
 #include "script.h"
 #include "main.h"
@@ -37,6 +41,9 @@ static struct http_parser_settings parser_settings = {
 
 static volatile sig_atomic_t stop = 0;
 
+/* XXX This is a hack not to pass parameter to the script module. */
+static const char *g_local_ip = NULL;
+
 static void handler(int sig) {
     stop = 1;
 }
@@ -45,6 +52,7 @@ static void usage() {
     printf("Usage: wrk <options> <url>                            \n"
            "  Options:                                            \n"
            "    -c, --connections <N>  Connections to keep open   \n"
+           "    -i, --local_ip    <S>  Bind to the specified local IP\n"
            "    -d, --duration    <T>  Duration of test           \n"
            "    -t, --threads     <N>  Number of threads to use   \n"
            "                                                      \n"
@@ -236,12 +244,35 @@ void *thread_main(void *arg) {
     return NULL;
 }
 
+void bind_socket(int fd)
+{
+    struct sockaddr_in sa;
+    int rc;
+
+    if (g_local_ip == NULL)
+        return;
+
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    rc = inet_aton(g_local_ip, &sa.sin_addr);
+    assert(rc != 0);
+    rc = bind(fd, (struct sockaddr*)&sa, sizeof sa);
+    assert(rc == 0);
+}
+
 static int connect_socket(thread *thread, connection *c) {
     struct addrinfo *addr = thread->addr;
     struct aeEventLoop *loop = thread->loop;
     int fd, flags;
 
     fd = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
+    if (fd < 0) {
+        char *msg = strerror(errno);
+        fprintf(stderr, "unable to create socket (errno=%d): %s\n", errno, msg);
+        exit(1);
+    }
+
+    bind_socket(fd);
 
     flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
@@ -473,6 +504,7 @@ static char *copy_url_part(char *url, struct http_parser_url *parts, enum http_p
 
 static struct option longopts[] = {
     { "connections", required_argument, NULL, 'c' },
+    { "local_ip",    required_argument, NULL, 'i' },
     { "duration",    required_argument, NULL, 'd' },
     { "threads",     required_argument, NULL, 't' },
     { "script",      required_argument, NULL, 's' },
@@ -494,13 +526,16 @@ static int parse_args(struct config *cfg, char **url, struct http_parser_url *pa
     cfg->duration    = 10;
     cfg->timeout     = SOCKET_TIMEOUT_MS;
 
-    while ((c = getopt_long(argc, argv, "t:c:d:s:H:T:Lrv?", longopts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "t:c:i:d:s:H:T:Lrv?", longopts, NULL)) != -1) {
         switch (c) {
             case 't':
                 if (scan_metric(optarg, &cfg->threads)) return -1;
                 break;
             case 'c':
                 if (scan_metric(optarg, &cfg->connections)) return -1;
+                break;
+            case 'i':
+                g_local_ip = optarg;
                 break;
             case 'd':
                 if (scan_time(optarg, &cfg->duration)) return -1;

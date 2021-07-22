@@ -463,10 +463,14 @@ static int script_wrk_lookup(lua_State *L) {
     return 1;
 }
 
+/* XXX Declare here not to include extra header. */
+void bind_socket(int fd);
+
 static int script_wrk_connect(lua_State *L) {
     struct addrinfo *addr = checkaddr(L);
     int fd, connected = 0;
     if ((fd = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol)) != -1) {
+        bind_socket(fd);
         connected = connect(fd, addr->ai_addr, addr->ai_addrlen) == 0;
         close(fd);
     }
