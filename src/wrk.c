@@ -115,7 +115,6 @@ int main(int argc, char **argv) {
     }
 
     signal(SIGPIPE, SIG_IGN);
-    signal(SIGINT,  SIG_IGN);
 
     statistics.latency  = stats_alloc(cfg.timeout * 1000);
     statistics.requests = stats_alloc(MAX_THREAD_RATE_S);
