@@ -71,6 +71,6 @@ typedef struct connection {
 
 extern char *g_local_ip;
 
-void bind_socket(int fd, char *addr);
+void bind_socket(int fd, sa_family_t family, const char *addr);
 
 #endif /* WRK_H */

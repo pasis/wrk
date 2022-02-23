@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <net/if.h>
 
 #include "wrk.h"
 #include "script.h"
@@ -358,20 +359,66 @@ void *thread_main(void *arg) {
     return NULL;
 }
 
-void bind_socket(int fd, char *addr)
+static const char *af_name(sa_family_t family)
 {
-    struct sockaddr_in sa;
+    switch (family) {
+    case AF_INET:
+        return "AF_INET";
+    case AF_INET6:
+        return "AF_INET6";
+    default:
+        return "Unknown";
+    }
+}
+
+void bind_socket(int fd, sa_family_t family, const char *bind_addr)
+{
+    void *dst;
     int rc;
+    socklen_t addrlen;
+    char *addr = strdup(bind_addr);
+
+    union {
+        struct sockaddr_in sa4;
+        struct sockaddr_in6 sa6;
+    } u_sa;
 
     if (g_local_ip == NULL)
         return;
 
-    memset(&sa, 0, sizeof sa);
-    sa.sin_family = AF_INET;
-    rc = inet_aton(addr, &sa.sin_addr);
-    assert(rc != 0);
-    rc = bind(fd, (struct sockaddr*)&sa, sizeof sa);
-    assert(rc == 0);
+    assert(addr != NULL);
+
+    memset(&u_sa, 0, sizeof u_sa);
+    if (family == AF_INET) {
+        u_sa.sa4.sin_family = AF_INET;
+        dst = (void*)&u_sa.sa4.sin_addr;
+        addrlen = sizeof(u_sa.sa4);
+    } else {
+        char *ifname;
+
+        u_sa.sa6.sin6_family = AF_INET6;
+        dst = (void*)&u_sa.sa6.sin6_addr;
+        addrlen = sizeof(u_sa.sa6);
+        ifname = strchr(addr, '%');
+        if (ifname != NULL) {
+            *ifname = '\0';
+            ++ifname;
+            u_sa.sa6.sin6_scope_id = if_nametoindex(ifname);
+        }
+    }
+    rc = inet_pton(family, addr, dst);
+    if (rc != 1) {
+        fprintf(stderr, "address '%s' is invalid for address family %s\n",
+                addr, af_name(family));
+        exit(1);
+    }
+    rc = bind(fd, (struct sockaddr*)&u_sa, addrlen);
+    if (rc != 0) {
+        fprintf(stderr, "warning: couldn't bind socket to address '%s', "
+                "benchmark results may be invalid\n", addr);
+    }
+
+    free(addr);
 }
 
 static int connect_socket(thread *thread, connection *c) {
@@ -389,7 +436,7 @@ static int connect_socket(thread *thread, connection *c) {
     }
 
     if (thread->local_ip != NULL)
-        bind_socket(fd, thread->local_ip);
+        bind_socket(fd, addr->ai_family, thread->local_ip);
 
     flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);

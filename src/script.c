@@ -469,7 +469,7 @@ static int script_wrk_connect(lua_State *L) {
     int fd, connected = 0;
     if ((fd = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol)) != -1) {
         if (g_local_ip != NULL)
-            bind_socket(fd, g_local_ip);
+            bind_socket(fd, addr->ai_family, g_local_ip);
         connected = connect(fd, addr->ai_addr, addr->ai_addrlen) == 0;
         close(fd);
     }
