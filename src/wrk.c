@@ -607,6 +607,10 @@ static void socket_connected(aeEventLoop *loop, int fd, void *data, int mask) {
             return;
     }
 
+    if (c->is_connected) {
+        return;
+    }
+
     http_parser_init(&c->parser, HTTP_RESPONSE);
     c->written = 0;
     c->thread->errors.established++;
