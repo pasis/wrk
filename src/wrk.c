@@ -87,6 +87,20 @@ static void usage() {
            "  Time arguments may include a time unit (2s, 2m, 2h)\n");
 }
 
+static size_t csv_nr(const char *s) {
+    const char *p = s;
+    size_t nr = 0;
+
+    if (s == NULL) {
+        return 0;
+    }
+    while ((p = strchr(p, ',')) != NULL) {
+        ++p;
+        ++nr;
+    }
+    return nr + 1;
+}
+
 int main(int argc, char **argv) {
     char *url, **headers = zmalloc(argc * sizeof(char *));
     struct http_parser_url parts = {};
@@ -130,24 +144,24 @@ int main(int argc, char **argv) {
     cfg.host = host;
 
     // Split comma separated IPs list into the array.
-    char *local_ip_arr[32];
-    size_t local_ip_nr = 0;
     char *local_ip_tokens = cfg.local_ip != NULL ? strdup(cfg.local_ip) : NULL;
+    size_t local_ip_nr = csv_nr(local_ip_tokens);
+    char **local_ip_arr = local_ip_nr > 0 ? malloc(local_ip_nr * sizeof(char *)) : NULL;
     if (local_ip_tokens != NULL) {
         char *saveptr = NULL;
         char *token = strtok_r(local_ip_tokens, ",", &saveptr);
+        size_t i = 0;
 
+        assert(local_ip_arr != NULL);
         while (token != NULL) {
             if (*token != '\0') {
-                if (local_ip_nr >= ARRAY_SIZE(local_ip_arr)) {
-                    fprintf(stderr, "Number of IPs exceeds predefined maximum (%zu). "
-                            "Ignoring the extra addresses.\n", ARRAY_SIZE(local_ip_arr));
-                    break;
-                }
-                local_ip_arr[local_ip_nr++] = token;
+                assert(i < local_ip_nr);
+                local_ip_arr[i++] = token;
             }
             token = strtok_r(NULL, ",", &saveptr);
         }
+        // We skip empty items, so 'i' may be lower then 'local_ip_nr'
+        local_ip_nr = i;
         if (local_ip_nr > 0)
             g_local_ip = local_ip_arr[0];
     }
@@ -267,6 +281,7 @@ int main(int argc, char **argv) {
     }
 
     free(local_ip_tokens);
+    free(local_ip_arr);
 
     return 0;
 }
