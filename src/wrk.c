@@ -169,7 +169,7 @@ int main(int argc, char **argv) {
     for (uint64_t i = 0; i < cfg.threads; i++) {
         thread *t      = &threads[i];
         // TODO Review whether we can reduce number of events per thread
-        t->loop        = aeCreateEventLoop(10 + cfg.connections * 3);
+        t->loop        = aeCreateEventLoop(20 + cfg.connections * 3);
         t->connections = cfg.connections / cfg.threads;
 
         if (local_ip_nr > 0)
