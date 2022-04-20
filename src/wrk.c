@@ -66,25 +66,26 @@ static void handler(int sig) {
 }
 
 static void usage() {
-    printf("Usage: wrk <options> <url>                            \n"
-           "  Options:                                            \n"
-           "    -c, --connections <N>  Connections to keep open   \n"
-           "    -i, --local_ip    <S>  Bind to the specified local IP(s)\n"
-           "                           It can be a comma separated list\n"
-           "    -d, --duration    <T>  Duration of test           \n"
-           "    -t, --threads     <N>  Number of threads to use   \n"
-           "                                                      \n"
-           "    -s, --script      <S>  Load Lua script file       \n"
-           "    -H, --header      <H>  Add header to request      \n"
-           "        --latency          Print latency statistics   \n"
-           "        --timeout     <T>  Socket/request timeout     \n"
-           "    -v, --version          Print version details      \n"
-           "    -W  --warmup           Enable warmup phase        \n"
-           "                           In warmup phase connections are establised,\n"
-           "                           but no requests are sent   \n"
-           "                                                      \n"
-           "  Numeric arguments may include a SI unit (1k, 1M, 1G)\n"
-           "  Time arguments may include a time unit (2s, 2m, 2h)\n");
+    printf("Usage: wrk <options> <url>                               \n"
+           "  Options:                                               \n"
+           "    -c, --connections    <N>  Connections to keep open   \n"
+           "    -i, --local_ip       <S>  Bind to the specified local IP(s)\n"
+           "                              It can be a comma separated list\n"
+           "    -d, --duration       <T>  Duration of test           \n"
+           "    -t, --threads        <N>  Number of threads to use   \n"
+           "                                                         \n"
+           "    -s, --script         <S>  Load Lua script file       \n"
+           "    -H, --header         <H>  Add header to request      \n"
+           "        --latency             Print latency statistics   \n"
+           "        --timeout        <T>  Socket/request timeout     \n"
+           "    -v, --version             Print version details      \n"
+           "    -W  --warmup              Enable warmup phase        \n"
+           "                              In warmup phase connections are establised,\n"
+           "                              but no requests are sent   \n"
+           "        --warmup-timeout <T>  Timeout for the warmup phase\n"
+           "                                                         \n"
+           "  Numeric arguments may include a SI unit (1k, 1M, 1G)   \n"
+           "  Time arguments may include a time unit (2s, 2m, 2h)    \n");
 }
 
 static size_t csv_nr(const char *s) {
@@ -286,11 +287,12 @@ int main(int argc, char **argv) {
     return 0;
 }
 
-static void phase_move(thread *thread, int phase) {
+static void phase_move(thread *thread, int phase, bool timeout) {
     if (thread->phase == PHASE_WARMUP && phase == PHASE_NORMAL) {
         connection *c  = thread->cs;
 
-        printf("Warmup phase is ended (thread=%p, duration=%"PRIu64"sec).\n",
+        printf("Warmup phase is %s (thread=%p, duration=%"PRIu64"sec).\n",
+               timeout ? "timed out" : "ended",
                thread, (time_us() - thread->start) / 1000000UL);
 
         for (uint64_t i = 0; i < thread->connections; i++, c++) {
@@ -310,7 +312,7 @@ static int warmup_timed_out(aeEventLoop *loop, long long id, void *data) {
     thread *thread = data;
 
     // It is safe to transit to NORMAL if we're already in NORMAL phase
-    phase_move(thread, PHASE_NORMAL);
+    phase_move(thread, PHASE_NORMAL, true);
 
     return AE_NOMORE;
 }
@@ -319,7 +321,7 @@ static int inter_thread_sync(aeEventLoop *loop, long long id, void *data) {
     thread *thread = data;
 
     if (g_is_ready) {
-        phase_move(thread, PHASE_NORMAL);
+        phase_move(thread, PHASE_NORMAL, false);
     }
 
     return thread->phase == PHASE_NORMAL ? AE_NOMORE : THREAD_SYNC_INTERVAL_MS;
@@ -351,16 +353,16 @@ void *thread_main(void *arg) {
     aeCreateTimeEvent(loop, RECORD_INTERVAL_MS, record_rate, thread, NULL);
 
     if (cfg.warmup) {
-        uint64_t warmup_timeout = cfg.warmup_timeout;
-        if (!warmup_timeout) {
-            // Default timeout is 600sec for 350K connections
-            warmup_timeout = cfg.connections * 600000UL / 350000UL;
-            if (warmup_timeout < 1000) {
+        uint64_t warmup_timeout_ms = cfg.warmup_timeout * 1000;
+        if (!warmup_timeout_ms) {
+            // Default timeout is 5ms per connection
+            warmup_timeout_ms = cfg.connections * 5;
+            if (warmup_timeout_ms < 1000) {
                 // Don't make too short timeout, not to be affected by timer resolution
-                warmup_timeout = 1000;
+                warmup_timeout_ms = 1000;
             }
         }
-        aeCreateTimeEvent(loop, warmup_timeout, warmup_timed_out, thread, NULL);
+        aeCreateTimeEvent(loop, warmup_timeout_ms, warmup_timed_out, thread, NULL);
     }
 
     thread->start = time_us();
@@ -727,22 +729,24 @@ static char *copy_url_part(char *url, struct http_parser_url *parts, enum http_p
 }
 
 static struct option longopts[] = {
-    { "connections", required_argument, NULL, 'c' },
-    { "local_ip",    required_argument, NULL, 'i' },
-    { "duration",    required_argument, NULL, 'd' },
-    { "threads",     required_argument, NULL, 't' },
-    { "script",      required_argument, NULL, 's' },
-    { "header",      required_argument, NULL, 'H' },
-    { "latency",     no_argument,       NULL, 'L' },
-    { "timeout",     required_argument, NULL, 'T' },
-    { "help",        no_argument,       NULL, 'h' },
-    { "version",     no_argument,       NULL, 'v' },
-    { "warmup",      no_argument,       NULL, 'W' },
-    { NULL,          0,                 NULL,  0  }
+    { "connections",    required_argument, NULL, 'c' },
+    { "local_ip",       required_argument, NULL, 'i' },
+    { "duration",       required_argument, NULL, 'd' },
+    { "threads",        required_argument, NULL, 't' },
+    { "script",         required_argument, NULL, 's' },
+    { "header",         required_argument, NULL, 'H' },
+    { "latency",        no_argument,       NULL, 'L' },
+    { "timeout",        required_argument, NULL, 'T' },
+    { "help",           no_argument,       NULL, 'h' },
+    { "version",        no_argument,       NULL, 'v' },
+    { "warmup",         no_argument,       NULL, 'W' },
+    { "warmup-timeout", required_argument, NULL,  0  },
+    { NULL,             0,                 NULL,  0  }
 };
 
 static int parse_args(struct config *cfg, char **url, struct http_parser_url *parts, char **headers, int argc, char **argv) {
     char **header = headers;
+    int option_index;
     int c;
 
     memset(cfg, 0, sizeof(struct config));
@@ -751,7 +755,7 @@ static int parse_args(struct config *cfg, char **url, struct http_parser_url *pa
     cfg->duration    = 10;
     cfg->timeout     = SOCKET_TIMEOUT_MS;
 
-    while ((c = getopt_long(argc, argv, "t:c:i:d:s:H:T:LrWv?", longopts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "t:c:i:d:s:H:T:LrWv?", longopts, &option_index)) != -1) {
         switch (c) {
             case 't':
                 if (scan_metric(optarg, &cfg->threads)) return -1;
@@ -784,6 +788,11 @@ static int parse_args(struct config *cfg, char **url, struct http_parser_url *pa
                 break;
             case 'W':
                 cfg->warmup = true;
+                break;
+            case 0:
+                if (strcmp(longopts[option_index].name, "warmup-timeout") == 0) {
+                    if (scan_time(optarg, &cfg->warmup_timeout)) return -1;
+                }
                 break;
             case 'h':
             case '?':
