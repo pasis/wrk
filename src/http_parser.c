@@ -2190,7 +2190,7 @@ http_parse_host_char(enum http_host_state s, const char ch) {
   return s_http_host_dead;
 }
 
-static int
+int
 http_parse_host(const char * buf, struct http_parser_url *u, int found_at) {
   enum http_host_state s;
 

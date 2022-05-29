@@ -414,6 +414,9 @@ const char *http_errno_description(enum http_errno err);
 /* Initialize all http_parser_url members to 0 */
 void http_parser_url_init(struct http_parser_url *u);
 
+/* Parse User-Info, Host and Port */
+int http_parse_host(const char * buf, struct http_parser_url *u, int found_at);
+
 /* Parse a URL; return nonzero on failure */
 int http_parser_parse_url(const char *buf, size_t buflen,
                           int is_connect,

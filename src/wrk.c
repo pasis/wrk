@@ -26,6 +26,7 @@ static struct config {
     uint64_t timeout;
     uint64_t pipeline;
     uint64_t warmup_timeout;
+    uint16_t secondaries_num;
     bool     warmup;
     bool     delay;
     bool     dynamic;
@@ -33,6 +34,7 @@ static struct config {
     char    *host;
     char    *script;
     char    *local_ip;
+    char    *sync_ipport;
     SSL_CTX *ctx;
 } cfg;
 
@@ -65,6 +67,10 @@ static void handler(int sig) {
     stop = 1;
 }
 
+extern void inter_process_clear_sync_sockets(uint16_t secondaries_num);
+extern bool inter_process_initiate_sync(const char *sync_ipport, uint16_t secondaries_num);
+extern void inter_process_sync(uint16_t secondaries_num);
+
 static void usage() {
     printf("Usage: wrk <options> <url>                               \n"
            "  Options:                                               \n"
@@ -78,6 +84,9 @@ static void usage() {
            "    -H, --header         <H>  Add header to request      \n"
            "        --latency             Print latency statistics   \n"
            "        --timeout        <T>  Socket/request timeout     \n"
+           "    -v, --version             Print version details      \n"
+           "    -p, --primary        <P>  Number of secondary wrks   \n"
+           "    -S, --sync     <ip:port>  Inter-wrk synch ip-port    \n"
            "    -v, --version             Print version details      \n"
            "    -W  --warmup              Enable warmup phase        \n"
            "                              In warmup phase connections are establised,\n"
@@ -135,14 +144,21 @@ int main(int argc, char **argv) {
     statistics.requests = stats_alloc(MAX_THREAD_RATE_S);
     thread *threads     = zcalloc(cfg.threads * sizeof(thread));
 
+    fprintf(stdout, "Testing connect to %s:%s\n", host, service);
     lua_State *L = script_create(cfg.script, url, headers);
     if (!script_resolve(L, host, service)) {
         char *msg = strerror(errno);
         fprintf(stderr, "unable to connect to %s:%s %s\n", host, service, msg);
         exit(1);
     }
+    fprintf(stdout, "Testing was successful\n");
 
     cfg.host = host;
+
+    if (!inter_process_initiate_sync(cfg.sync_ipport, cfg.secondaries_num)) {
+        inter_process_clear_sync_sockets(cfg.secondaries_num);
+        exit(3);
+    }
 
     // Split comma separated IPs list into the array.
     char *local_ip_tokens = cfg.local_ip != NULL ? strdup(cfg.local_ip) : NULL;
@@ -193,6 +209,7 @@ int main(int argc, char **argv) {
         if (!t->loop || pthread_create(&t->thread, NULL, &thread_main, t)) {
             char *msg = strerror(errno);
             fprintf(stderr, "unable to create thread %"PRIu64": %s\n", i, msg);
+            inter_process_clear_sync_sockets(cfg.secondaries_num);
             exit(2);
         }
     }
@@ -283,6 +300,7 @@ int main(int argc, char **argv) {
 
     free(local_ip_tokens);
     free(local_ip_arr);
+    inter_process_clear_sync_sockets(cfg.secondaries_num);
 
     return 0;
 }
@@ -352,7 +370,7 @@ void *thread_main(void *arg) {
     aeEventLoop *loop = thread->loop;
     aeCreateTimeEvent(loop, RECORD_INTERVAL_MS, record_rate, thread, NULL);
 
-    if (cfg.warmup) {
+    if (cfg.warmup && !cfg.sync_ipport) {
         uint64_t warmup_timeout_ms = cfg.warmup_timeout * 1000;
         if (!warmup_timeout_ms) {
             // Default timeout is 5ms per connection
@@ -632,6 +650,7 @@ static void socket_connected(aeEventLoop *loop, int fd, void *data, int mask) {
         aeCreateTimeEvent(c->thread->loop, THREAD_SYNC_INTERVAL_MS, inter_thread_sync, c->thread, NULL);
         int counter = __sync_add_and_fetch(&g_ready_threads, 1);
         if (counter == cfg.threads) {
+            inter_process_sync(cfg.secondaries_num);
             g_is_ready = 1;
         }
     }
@@ -715,7 +734,7 @@ static uint64_t time_us() {
     return (t.tv_sec * 1000000) + t.tv_usec;
 }
 
-static char *copy_url_part(char *url, struct http_parser_url *parts, enum http_parser_url_fields field) {
+char *copy_url_part(const char *url, struct http_parser_url *parts, enum http_parser_url_fields field) {
     char *part = NULL;
 
     if (parts->field_set & (1 << field)) {
@@ -739,6 +758,8 @@ static struct option longopts[] = {
     { "timeout",        required_argument, NULL, 'T' },
     { "help",           no_argument,       NULL, 'h' },
     { "version",        no_argument,       NULL, 'v' },
+    { "primary",        required_argument, NULL, 'p' },
+    { "sync",           required_argument, NULL, 'S' },
     { "warmup",         no_argument,       NULL, 'W' },
     { "warmup-timeout", required_argument, NULL,  0  },
     { NULL,             0,                 NULL,  0  }
@@ -755,7 +776,7 @@ static int parse_args(struct config *cfg, char **url, struct http_parser_url *pa
     cfg->duration    = 10;
     cfg->timeout     = SOCKET_TIMEOUT_MS;
 
-    while ((c = getopt_long(argc, argv, "t:c:i:d:s:H:T:LrWv?", longopts, &option_index)) != -1) {
+    while ((c = getopt_long(argc, argv, "t:c:i:d:s:H:T:p:S:LrWv?", longopts, &option_index)) != -1) {
         switch (c) {
             case 't':
                 if (scan_metric(optarg, &cfg->threads)) return -1;
@@ -788,6 +809,12 @@ static int parse_args(struct config *cfg, char **url, struct http_parser_url *pa
                 break;
             case 'W':
                 cfg->warmup = true;
+                break;
+            case 'p':
+                cfg->secondaries_num = (uint16_t)atoi(optarg);
+                break;
+            case 'S':
+                cfg->sync_ipport = optarg;
                 break;
             case 0:
                 if (strcmp(longopts[option_index].name, "warmup-timeout") == 0) {
