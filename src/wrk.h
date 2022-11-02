@@ -60,6 +60,9 @@ typedef struct connection {
     bool is_connected;
     bool delayed;
     uint64_t start;
+    uint64_t r_completed;
+    uint64_t r_started;
+    uint64_t r_read;
     char *request;
     size_t length;
     size_t written;

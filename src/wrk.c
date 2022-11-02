@@ -255,6 +255,19 @@ int main(int argc, char **argv) {
         errors.status  += t->errors.status;
         errors.established += t->errors.established;
         errors.reconnect += t->errors.reconnect;
+
+#if 0
+        for (uint64_t j = 0; j < t->connections; ++j) {
+            ssize_t rc;
+            ssize_t extra = 0;
+            char buf[16 * 1024];
+            while ((rc = read(t->cs[j].fd, buf, sizeof(buf))) > 0) {
+                extra += rc;
+            }
+            printf("Thread #%lu connection #%lu started=%lu completed=%lu read=%lu extra=%ld\n", i, j, t->cs[j].r_started, t->cs[j].r_completed, t->cs[j].r_read, extra);
+        }
+        zfree(t->cs);
+#endif
     }
 
     if (phase_normal_start_min != 0) {
@@ -270,6 +283,53 @@ int main(int argc, char **argv) {
         int64_t interval = runtime_us / (complete / cfg.connections);
         stats_correct(statistics.latency, interval);
     }
+
+    uint64_t max_completed = 0;
+    for (uint64_t i = 0; i < cfg.threads; i++) {
+        thread *t = &threads[i];
+        for (uint64_t j = 0; j < t->connections; ++j) {
+            connection *c = &t->cs[j];
+            if (c->r_completed > max_completed) {
+                max_completed = c->r_completed;
+            }
+        }
+    }
+    #define HIST_SZ 6
+    uint64_t inactive_nr = 0;
+    uint64_t hist[HIST_SZ] = { 0, };
+    uint64_t hist_range[HIST_SZ + 1] = { 0, };
+    double hist_step[HIST_SZ] = { 0.05, 0.15, 0.3, 0.3, 0.15, 0.05 };
+    double step = 0;
+    for (uint64_t idx = 0; idx < HIST_SZ; ++idx) {
+        hist_range[idx] = (uint64_t)((double)max_completed * step);
+        step += hist_step[idx];
+    }
+    hist_range[HIST_SZ] = max_completed;
+    for (uint64_t i = 0; i < cfg.threads; i++) {
+        thread *t = &threads[i];
+        for (uint64_t j = 0; j < t->connections; ++j) {
+            connection *c = &t->cs[j];
+            if (c->r_completed == 0 && c->r_read == 0) {
+                ++inactive_nr;
+            } else {
+                uint64_t idx;
+                for (idx = 0; idx < HIST_SZ && c->r_completed >= hist_range[idx]; ++idx)
+                    ;
+                assert(idx > 0);
+                --idx;
+                ++hist[idx];
+            }
+        }
+        zfree(t->cs);
+    }
+    printf("\n");
+    printf("Fairness histogram (connections per completed requests ranges):\n");
+    printf("Inactive: %" PRIu64 "\n", inactive_nr);
+    for (uint64_t idx = 0; idx < HIST_SZ; ++idx) {
+        printf("Range#%" PRIu64 " %3.0lf%% (%" PRIu64 " - %" PRIu64 "): %" PRIu64 "\n",
+               idx, hist_step[idx] * 100, hist_range[idx], hist_range[idx + 1], hist[idx]);
+    }
+    printf("\n");
 
     print_stats_header();
     print_stats("Latency", statistics.latency, format_time_us);
@@ -290,7 +350,7 @@ int main(int argc, char **argv) {
 
     printf("Established connections: %u\n", errors.established);
     printf("Requests/sec: %9.2Lf\n", req_per_s);
-    printf("Transfer/sec: %10sB\n", format_binary(bytes_per_s));
+    printf("Transfer/sec: %10sB (%sbit)\n", format_binary(bytes_per_s), format_metric(bytes_per_s * 8));
 
     if (script_has_done(L)) {
         script_summary(L, runtime_us, complete, bytes);
@@ -388,7 +448,6 @@ void *thread_main(void *arg) {
     aeMain(loop);
 
     aeDeleteEventLoop(loop);
-    zfree(thread->cs);
 
     return NULL;
 }
@@ -563,6 +622,7 @@ static int response_complete(http_parser *parser) {
 
     thread->complete++;
     thread->requests++;
+    c->r_completed++;
 
     if (status > 399) {
         thread->errors.status++;
@@ -687,8 +747,15 @@ static void socket_writeable(aeEventLoop *loop, int fd, void *data, int mask) {
 
     switch (sock.write(c, buf, len, &n)) {
         case OK:    break;
-        case ERROR: goto error;
+        case ERROR:
+            printf("write error: errno=%d\n", errno);
+            goto error;
         case RETRY: return;
+    }
+
+    if (!c->written && n) {
+        c->r_started++;
+        c->r_read = 0;
     }
 
     c->written += n;
@@ -711,14 +778,23 @@ static void socket_readable(aeEventLoop *loop, int fd, void *data, int mask) {
     do {
         switch (sock.read(c, &n)) {
             case OK:    break;
-            case ERROR: goto error;
+            case ERROR:
+                printf("read error: errno=%d\n", errno);
+                goto error;
             case RETRY: return;
         }
 
-        if (http_parser_execute(&c->parser, &parser_settings, c->buf, n) != n) goto error;
-        if (n == 0 && !http_body_is_final(&c->parser)) goto error;
+        if (http_parser_execute(&c->parser, &parser_settings, c->buf, n) != n) {
+            printf("read error: http_parser_execute\n");
+            goto error;
+        }
+        if (n == 0 && !http_body_is_final(&c->parser)) {
+            printf("read error: http_body_is_final\n");
+            goto error;
+        }
 
         c->thread->bytes += n;
+        c->r_read += n;
     } while (n == RECVBUF && sock.readable(c) > 0);
 
     return;
